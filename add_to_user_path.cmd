@@ -4,7 +4,7 @@ setlocal
 set "TARGET_DIR=%~dp0"
 if "%TARGET_DIR:~-1%"=="\" set "TARGET_DIR=%TARGET_DIR:~0,-1%"
 
-echo Codex Any-Node Fork PATH Setup
+echo Codex Session Toolkit PATH Setup
 echo.
 echo Target directory:
 echo %TARGET_DIR%
@@ -46,6 +46,9 @@ if /I "%VERIFY_VALUE%"=="YES" (
     )
     echo.
     echo Open a new Command Prompt or PowerShell window, then run:
+    echo codex-toolkit -ls
+    echo.
+    echo Legacy aliases still work:
     echo fork -ls
 ) else (
     echo PATH update may not have completed correctly.

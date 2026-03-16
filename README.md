@@ -1,25 +1,16 @@
-# Codex Any-Node Fork
+# Codex Session Toolkit
 
 中文说明: [README_CN.md](./README_CN.md)
 
-A lightweight Windows tool for browsing local Codex Desktop / Codex CLI conversations by working directory, creating a fork from any selectable conversation node, and switching between local Codex account profiles. It now includes both an interactive CLI and a graphical GUI.
+A Windows toolkit for browsing local Codex Desktop / Codex CLI conversations by working directory, forking from any user turn, switching local account profiles, and transferring conversations between accounts. It includes both an interactive CLI and a graphical GUI.
 
 ## Features
 
-- Filter local Codex conversations by the current working directory
-- Navigate conversations with the keyboard
-- Browse conversations and user messages in a graphical interface
-- The GUI uses a modern dark dashboard layout with a status rail, recent workdirs, and split content panels
-- Show only user messages as fork candidates
-- Create a new branch thread with `fork + rollback`
-- Switch Codex accounts by copying `config.toml` and `auth.json` from a prepared account folder into the target Codex home
-- Back up the existing target account files automatically before an account switch
-- Remember selected or used work directories in the GUI and prefer them on the next launch
-- Refresh the conversation list manually from the GUI
-- Refresh the conversation list automatically when the work directory changes
-- Refresh the conversation list automatically after a successful fork
-- Transfer conversations between local accounts with account-aware grouping, manual assignment, and multi-select copy
-- Use CLI transfer commands to inspect grouped conversations, assign ownership, and copy sessions to another account
+- Browse and filter local Codex conversations by workspace
+- Fork from any user turn with `fork + rollback`
+- Switch local Codex account profiles
+- Transfer or copy conversations between local accounts
+- Use either the interactive CLI or the graphical GUI
 
 ## Requirements
 
@@ -38,17 +29,16 @@ For first-time setup, beginners can run:
 .\add_to_user_path.cmd
 ```
 
-
 Run:
 
 ```powershell
-fork -ls
+codex-toolkit -ls
 ```
 
 Launch the GUI:
 
 ```powershell
-fork --gui
+codex-toolkit --gui
 ```
 
 On Windows this path prefers launching the GUI as a detached no-console process.
@@ -56,16 +46,17 @@ On Windows this path prefers launching the GUI as a detached no-console process.
 Or use the dedicated launcher:
 
 ```powershell
-fork-gui
+codex-toolkit-gui
 ```
 
 The launcher prefers `pythonw` so the GUI does not keep an extra `cmd` window open.
 
+The legacy launchers `fork.cmd` and `fork-gui.cmd` are kept as compatibility shims.
 
 If the project directory is not in `PATH`, use:
 
 ```powershell
-.\fork.cmd -ls
+.\codex-toolkit.cmd -ls
 ```
 
 Or run the script directly:
@@ -83,37 +74,37 @@ python .\scripts\fork_gui.py
 List switchable accounts:
 
 ```powershell
-fork --list-accounts
+codex-toolkit --list-accounts
 ```
 
 Switch to a specific account:
 
 ```powershell
-fork --switch-account user1
+codex-toolkit --switch-account user1
 ```
 
 If your account source folders live outside the default location, pass:
 
 ```powershell
-fork --list-accounts --accounts-root D:\path\to\accounts
+codex-toolkit --list-accounts --accounts-root D:\path\to\accounts
 ```
 
 Inspect transfer groups for the current workdir:
 
 ```powershell
-fork --list-transfer-view --accounts-root D:\path\to\accounts
+codex-toolkit --list-transfer-view --accounts-root D:\path\to\accounts
 ```
 
 Assign conversations to an account in the transfer mapping:
 
 ```powershell
-fork --assign-conversations-to user1 --transfer-sources THREAD_ID_1 THREAD_ID_2
+codex-toolkit --assign-conversations-to user1 --transfer-sources THREAD_ID_1 THREAD_ID_2
 ```
 
 Copy conversations to another account:
 
 ```powershell
-fork --copy-conversations-to api --transfer-sources THREAD_ID_1 THREAD_ID_2
+codex-toolkit --copy-conversations-to api --transfer-sources THREAD_ID_1 THREAD_ID_2
 ```
 
 ## Controls
@@ -140,22 +131,6 @@ fork --copy-conversations-to api --transfer-sources THREAD_ID_1 THREAD_ID_2
 After entering a conversation, the tool shows only user messages.
 Once a target message is selected, it creates a new thread and rolls that new thread back to the matching turn.
 
-## Simplified Flow
-
-```mermaid
-flowchart TD
-    A["Run `fork -ls`"] --> B["Scan local conversations for the current working directory"]
-    B --> C["Select a conversation"]
-    C --> D["List only user messages in that conversation"]
-    D --> E["Select a target user message"]
-    E --> F["Confirm fork target"]
-    F --> G["Read the source thread and locate the target turn"]
-    G --> H["Run `thread/fork` to create a new thread"]
-    H --> I["Run `thread/rollback` on the new thread"]
-    I --> J["Verify the last turn of the new thread"]
-    J --> K["Fork completed"]
-```
-
 ## Project Structure
 
 ```text
@@ -164,6 +139,8 @@ flowchart TD
 │  ├─ .gitkeep
 │  └─ README.md
 ├─ add_to_user_path.cmd
+├─ codex-toolkit.cmd
+├─ codex-toolkit-gui.cmd
 ├─ fork.cmd
 ├─ fork-gui.cmd
 ├─ LICENSE
@@ -184,12 +161,11 @@ flowchart TD
    └─ transfer_dialog.py
 ```
 
-
 ## Module Roles
 
 - `fork_gui.py`: main dashboard window, workspace browser, account switcher, and fork flow orchestration
 - `transfer_dialog.py`: dedicated conversation transfer window and its GUI-only interaction logic
-- `fork_cli.py`: primary CLI entrypoint and interactive any-node fork flow
+- `fork_cli.py`: primary CLI entrypoint for workspace browsing, forking, and account operations
 - `transfer_cli.py`: non-interactive transfer commands for listing, assigning, and copying conversations
 - `conversation_transfer.py`: transfer domain logic including provider inference, conversation grouping, ownership classification, and copy workflow
 - `app_state.py`: local JSON-backed state management for remembered GUI workdirs and account-session mappings

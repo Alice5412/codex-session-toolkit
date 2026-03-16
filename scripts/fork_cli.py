@@ -1318,7 +1318,7 @@ def run_interactive(codex_home: Path, workdir: Path) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Interactive Codex any-node fork tool")
+    parser = argparse.ArgumentParser(description="Interactive Codex session toolkit")
     parser.add_argument("-ls", "--list-sessions", action="store_true", help="List conversations for the current working directory")
     parser.add_argument("--gui", action="store_true", help="Launch the graphical interface")
     parser.add_argument("--codex-home", type=Path, default=DEFAULT_CODEX_HOME, help="Codex home directory")

@@ -435,7 +435,7 @@ class ForkGuiApp:
 
         self.tray_icon = (
             WindowsTrayIcon(
-                tooltip="Codex Any-Node Fork",
+                tooltip="Codex Session Toolkit",
                 on_restore=lambda: self.root.after(0, self.restore_from_tray),
                 on_exit=lambda: self.root.after(0, self.exit_application),
             )
@@ -453,7 +453,7 @@ class ForkGuiApp:
         self.refresh_sessions()
 
     def _configure_root(self) -> None:
-        self.root.title("Codex Any-Node Fork")
+        self.root.title("Codex Session Toolkit")
         self.root.geometry("1540x940")
         self.root.minsize(1240, 760)
         self.root.configure(bg=APP_BG)
@@ -613,7 +613,7 @@ class ForkGuiApp:
 
         tk.Label(
             brand_card,
-            text="Codex Fork",
+            text="Codex Toolkit",
             bg=CARD_BG,
             fg=TEXT_PRIMARY,
             font=ui_font(22, "bold"),
@@ -705,7 +705,7 @@ class ForkGuiApp:
 
         tk.Label(
             header_card,
-            text="Fork And Switch Dashboard",
+            text="Sessions And Accounts Dashboard",
             bg=CARD_BG,
             fg=TEXT_PRIMARY,
             font=ui_font(28, "bold"),
@@ -1843,7 +1843,7 @@ class ForkGuiApp:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Graphical Codex any-node fork tool")
+    parser = argparse.ArgumentParser(description="Graphical Codex session toolkit")
     parser.add_argument("--codex-home", type=Path, default=DEFAULT_CODEX_HOME, help="Codex home directory")
     parser.add_argument("--workdir", type=Path, help="Target working directory; defaults to the remembered GUI workdir or current directory")
     parser.add_argument("--accounts-root", type=Path, help="Directory containing one subdirectory per switchable account")

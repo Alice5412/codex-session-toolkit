@@ -1,4 +1,4 @@
-@echo off
-setlocal
-python "%~dp0scripts\fork_cli.py" %*
-endlocal
+@echo off
+setlocal
+call "%~dp0codex-toolkit.cmd" %*
+endlocal
