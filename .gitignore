@@ -36,3 +36,8 @@ Desktop.ini
 *.log
 *.tmp
 *.temp
+
+# Local Codex account sources
+accounts/*
+!accounts/.gitkeep
+!accounts/README.md

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import ctypes
-import json
 import os
 import sys
 import threading
@@ -15,6 +14,20 @@ from tkinter import filedialog, messagebox, ttk
 if os.name == "nt":
     from ctypes import wintypes
 
+from account_switcher import (
+    AccountSourceSummary,
+    AccountSwitchError,
+    describe_target_codex_home,
+    detect_default_accounts_root,
+    find_matching_target_account,
+    list_account_sources,
+    resolve_account_source,
+    resolve_accounts_root,
+    switch_account,
+)
+from app_state import load_gui_state, save_gui_state
+from conversation_transfer import ConversationCopyResult
+from desktop_app import restart_codex_desktop_app
 from fork_cli import (
     DEFAULT_CODEX_HOME,
     CodexAppServerClient,
@@ -25,26 +38,28 @@ from fork_cli import (
     load_user_turns_for_session,
     parse_user_turns_from_rollout,
     perform_fork,
-    restart_codex_desktop_app,
 )
+from gui_theme import (
+    ACCENT,
+    ACCENT_HOVER,
+    ACCENT_SOFT,
+    APP_BG,
+    BORDER,
+    CARD_ALT_BG,
+    CARD_BG,
+    INPUT_BG,
+    SELECTION_BG,
+    SIDEBAR_BG,
+    SURFACE_BG,
+    TABLE_BG,
+    TEXT_MUTED,
+    TEXT_PRIMARY,
+    TEXT_SECONDARY,
+    short_text,
+    ui_font,
+)
+from transfer_dialog import ConversationTransferDialog
 
-APP_BG = "#081120"
-SURFACE_BG = "#0d1930"
-SIDEBAR_BG = "#091326"
-CARD_BG = "#11213d"
-CARD_ALT_BG = "#172b4f"
-INPUT_BG = "#0b1730"
-TABLE_BG = "#0c172e"
-BORDER = "#22385f"
-TEXT_PRIMARY = "#f3f7ff"
-TEXT_SECONDARY = "#8fa6c7"
-TEXT_MUTED = "#61789a"
-ACCENT = "#3b82f6"
-ACCENT_HOVER = "#2563eb"
-ACCENT_SOFT = "#17396f"
-SELECTION_BG = "#1d4ed8"
-
-GUI_STATE_PATH = Path(os.environ.get("APPDATA", str(Path.home()))) / "codex-any-node-fork" / "gui-state.json"
 MAX_REMEMBERED_WORKDIRS = 15
 
 
@@ -74,67 +89,12 @@ def unique_existing_workdirs(values: list[object]) -> list[str]:
     return result
 
 
-def load_gui_state() -> dict[str, object]:
-    if not GUI_STATE_PATH.exists():
-        return {"last_workdir": "", "recent_workdirs": [], "minimize_to_tray_on_close": False}
-    try:
-        data = json.loads(GUI_STATE_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {"last_workdir": "", "recent_workdirs": [], "minimize_to_tray_on_close": False}
-    if not isinstance(data, dict):
-        return {"last_workdir": "", "recent_workdirs": [], "minimize_to_tray_on_close": False}
-
-    recent = data.get("recent_workdirs")
-    workdir_candidates: list[object] = []
-    last_workdir = data.get("last_workdir")
-    if isinstance(last_workdir, str):
-        workdir_candidates.append(last_workdir)
-    if isinstance(recent, list):
-        workdir_candidates.extend(recent)
-
-    remembered = unique_existing_workdirs(workdir_candidates)
-    return {
-        "last_workdir": remembered[0] if remembered else "",
-        "recent_workdirs": remembered,
-        "minimize_to_tray_on_close": bool(data.get("minimize_to_tray_on_close")),
-    }
-
-
-def save_gui_state(
-    *,
-    last_workdir: str,
-    recent_workdirs: list[str],
-    minimize_to_tray_on_close: bool,
-) -> None:
-    payload = {
-        "last_workdir": last_workdir,
-        "recent_workdirs": recent_workdirs[:MAX_REMEMBERED_WORKDIRS],
-        "minimize_to_tray_on_close": minimize_to_tray_on_close,
-    }
-    GUI_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    GUI_STATE_PATH.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-
-def short_text(value: str, limit: int = 48) -> str:
-    collapsed = " ".join(value.split())
-    if len(collapsed) <= limit:
-        return collapsed
-    return collapsed[: limit - 3] + "..."
-
-
 def short_workspace_label(path_value: str) -> str:
     path = Path(path_value)
     name = path.name.strip()
     if name:
         return short_text(name, 28)
     return short_text(path_value, 28)
-
-
-def ui_font(size: int, weight: str = "normal") -> str:
-    return f"{{Segoe UI}} {size}" if weight == "normal" else f"{{Segoe UI}} {size} {weight}"
 
 
 if os.name == "nt":
@@ -406,12 +366,23 @@ class ForkGuiApp:
         root: tk.Tk,
         codex_home: Path,
         workdir: Path,
+        accounts_root: Path | None,
         remembered_workdirs: list[str],
         minimize_to_tray_on_close: bool,
     ) -> None:
+        initial_accounts_root = ""
+        if accounts_root is not None:
+            initial_accounts_root = str(accounts_root.expanduser().resolve())
+        else:
+            detected_accounts_root = detect_default_accounts_root()
+            if detected_accounts_root is not None:
+                initial_accounts_root = str(detected_accounts_root)
+
         self.root = root
         self.codex_home_var = tk.StringVar(value=str(codex_home))
         self.workdir_var = tk.StringVar(value=normalize_workdir(workdir))
+        self.accounts_root_var = tk.StringVar(value=initial_accounts_root)
+        self.selected_account_var = tk.StringVar(value="")
         self.status_var = tk.StringVar(value="Ready.")
         self.session_metric_var = tk.StringVar(value="0")
         self.turn_metric_var = tk.StringVar(value="0")
@@ -420,6 +391,9 @@ class ForkGuiApp:
         self.last_refresh_var = tk.StringVar(value="Waiting for first refresh")
         self.selection_summary_var = tk.StringVar(value="No conversation selected")
         self.turn_summary_var = tk.StringVar(value="No user message selected")
+        self.active_account_var = tk.StringVar(value="Active match: not checked")
+        self.installed_account_var = tk.StringVar(value="Installed target: not checked")
+        self.account_status_var = tk.StringVar(value="Account switcher is ready.")
         self.minimize_to_tray_var = tk.BooleanVar(value=minimize_to_tray_on_close)
         self.remembered_workdirs = unique_existing_workdirs(
             [str(workdir), *remembered_workdirs]
@@ -427,10 +401,13 @@ class ForkGuiApp:
         self.last_loaded_workdir = ""
         self.is_hidden_to_tray = False
 
+        self.accounts: list[AccountSourceSummary] = []
+        self.account_index: dict[str, AccountSourceSummary] = {}
         self.sessions: list[SessionSummary] = []
         self.session_index: dict[str, SessionSummary] = {}
         self.turns: list[UserTurnSummary] = []
         self.turn_index: dict[str, UserTurnSummary] = {}
+        self.transfer_dialog: ConversationTransferDialog | None = None
 
         self.busy_count = 0
         self.session_request_token = 0
@@ -439,10 +416,16 @@ class ForkGuiApp:
 
         self.refresh_button: ttk.Button
         self.fork_button: ttk.Button
+        self.transfer_button: ttk.Button
+        self.account_refresh_button: ttk.Button
+        self.account_switch_button: ttk.Button
         self.codex_home_browse_button: ttk.Button
         self.workdir_browse_button: ttk.Button
+        self.accounts_root_browse_button: ttk.Button
         self.codex_home_entry: ttk.Entry
         self.workdir_combo: ttk.Combobox
+        self.accounts_root_entry: ttk.Entry
+        self.account_combo: ttk.Combobox
         self.recent_workdirs_listbox: tk.Listbox
         self.sessions_tree: ttk.Treeview
         self.turns_tree: ttk.Treeview
@@ -466,6 +449,7 @@ class ForkGuiApp:
         self._rebuild_recent_workdirs_list()
         self._sync_recent_workdir_selection()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close_requested)
+        self.refresh_accounts()
         self.refresh_sessions()
 
     def _configure_root(self) -> None:
@@ -617,7 +601,7 @@ class ForkGuiApp:
         content = tk.Frame(shell, bg=APP_BG)
         content.grid(row=0, column=1, sticky="nsew")
         content.columnconfigure(0, weight=1)
-        content.rowconfigure(3, weight=1)
+        content.rowconfigure(4, weight=1)
 
         self._build_sidebar(sidebar)
         self._build_content(content)
@@ -721,7 +705,7 @@ class ForkGuiApp:
 
         tk.Label(
             header_card,
-            text="Fork Dashboard",
+            text="Fork And Switch Dashboard",
             bg=CARD_BG,
             fg=TEXT_PRIMARY,
             font=ui_font(28, "bold"),
@@ -729,7 +713,7 @@ class ForkGuiApp:
         ).grid(row=0, column=0, sticky="w")
         tk.Label(
             header_card,
-            text="Browse remembered workspaces, inspect user turns, and create a clean branch thread.",
+            text="Browse remembered workspaces, fork from any user turn, and switch Codex account files without leaving the same console.",
             bg=CARD_BG,
             fg=TEXT_SECONDARY,
             font=ui_font(11),
@@ -778,9 +762,92 @@ class ForkGuiApp:
         self.refresh_button.grid(row=0, column=0, padx=(0, 10))
         self.fork_button = ttk.Button(actions, text="Fork Selected Turn", style="Primary.TButton", command=self.start_fork)
         self.fork_button.grid(row=0, column=1)
+        self.transfer_button = ttk.Button(
+            actions,
+            text="Transfer Conversations",
+            style="Secondary.TButton",
+            command=self.open_transfer_dialog,
+        )
+        self.transfer_button.grid(row=0, column=2, padx=(10, 0))
+
+        account_card = self._build_card(parent, padded=True)
+        account_card.grid(row=3, column=0, sticky="ew", pady=(0, 16))
+        account_card.columnconfigure(1, weight=1)
+        account_card.columnconfigure(4, weight=1)
+        self._build_card_title(account_card, "Account Switcher").grid(row=0, column=0, columnspan=7, sticky="w")
+
+        tk.Label(account_card, text="Accounts Root", bg=CARD_BG, fg=TEXT_SECONDARY, font=ui_font(10, "bold")).grid(row=1, column=0, sticky="w", padx=(0, 10), pady=(12, 0))
+        self.accounts_root_entry = ttk.Entry(account_card, textvariable=self.accounts_root_var, style="App.TEntry")
+        self.accounts_root_entry.grid(row=1, column=1, sticky="ew", padx=(0, 10), pady=(12, 0))
+        self.accounts_root_browse_button = ttk.Button(
+            account_card,
+            text="Browse...",
+            style="Secondary.TButton",
+            command=self.browse_accounts_root,
+        )
+        self.accounts_root_browse_button.grid(row=1, column=2, sticky="w", padx=(0, 18), pady=(12, 0))
+
+        tk.Label(account_card, text="Account", bg=CARD_BG, fg=TEXT_SECONDARY, font=ui_font(10, "bold")).grid(row=1, column=3, sticky="w", padx=(0, 10), pady=(12, 0))
+        self.account_combo = ttk.Combobox(
+            account_card,
+            textvariable=self.selected_account_var,
+            values=[],
+            style="App.TCombobox",
+        )
+        self.account_combo.grid(row=1, column=4, sticky="ew", padx=(0, 10), pady=(12, 0))
+        self.account_combo.bind("<<ComboboxSelected>>", self.on_account_selected)
+        self.account_combo.bind("<Return>", self.on_account_submitted)
+
+        account_actions = tk.Frame(account_card, bg=CARD_BG)
+        account_actions.grid(row=1, column=5, columnspan=2, sticky="e", pady=(12, 0))
+        self.account_refresh_button = ttk.Button(
+            account_actions,
+            text="Refresh Accounts",
+            style="Secondary.TButton",
+            command=self.refresh_accounts,
+        )
+        self.account_refresh_button.grid(row=0, column=0, padx=(0, 10))
+        self.account_switch_button = ttk.Button(
+            account_actions,
+            text="Switch Account",
+            style="Primary.TButton",
+            command=self.start_account_switch,
+        )
+        self.account_switch_button.grid(row=0, column=1)
+
+        tk.Label(
+            account_card,
+            textvariable=self.active_account_var,
+            bg=CARD_BG,
+            fg=TEXT_PRIMARY,
+            font=ui_font(10, "bold"),
+            wraplength=980,
+            justify="left",
+            anchor="w",
+        ).grid(row=2, column=0, columnspan=7, sticky="ew", pady=(14, 4))
+        tk.Label(
+            account_card,
+            textvariable=self.installed_account_var,
+            bg=CARD_BG,
+            fg=TEXT_SECONDARY,
+            font=ui_font(10),
+            wraplength=980,
+            justify="left",
+            anchor="w",
+        ).grid(row=3, column=0, columnspan=7, sticky="ew", pady=(0, 4))
+        tk.Label(
+            account_card,
+            textvariable=self.account_status_var,
+            bg=CARD_BG,
+            fg=TEXT_MUTED,
+            font=ui_font(10),
+            wraplength=980,
+            justify="left",
+            anchor="w",
+        ).grid(row=4, column=0, columnspan=7, sticky="ew")
 
         lists = tk.Frame(parent, bg=APP_BG)
-        lists.grid(row=3, column=0, sticky="nsew")
+        lists.grid(row=4, column=0, sticky="nsew")
         lists.columnconfigure(0, weight=1)
         lists.columnconfigure(1, weight=1)
         lists.rowconfigure(0, weight=1)
@@ -957,6 +1024,7 @@ class ForkGuiApp:
         )
         if selected:
             self.codex_home_var.set(selected)
+            self.refresh_accounts()
 
     def browse_workdir(self) -> None:
         selected = filedialog.askdirectory(
@@ -968,6 +1036,234 @@ class ForkGuiApp:
         if selected:
             self.workdir_var.set(normalize_workdir(selected))
             self.handle_workdir_change(show_error=True)
+
+    def browse_accounts_root(self) -> None:
+        initialdir = self.accounts_root_var.get().strip() or str(Path(__file__).resolve().parent.parent)
+        selected = filedialog.askdirectory(
+            parent=self.root,
+            initialdir=initialdir,
+            mustexist=True,
+            title="Select account source root",
+        )
+        if selected:
+            self.accounts_root_var.set(normalize_workdir(selected))
+            self.refresh_accounts(show_message_on_error=True)
+
+    def refresh_accounts(self, show_message_on_error: bool = False) -> None:
+        if self.busy_count > 0:
+            return
+
+        raw_root = self.accounts_root_var.get().strip()
+        if not raw_root:
+            detected = detect_default_accounts_root()
+            if detected is None:
+                self.accounts = []
+                self.account_index = {}
+                self.selected_account_var.set("")
+                self.account_combo.configure(values=[])
+                self.active_account_var.set("Active match: no account source folder detected")
+                self.installed_account_var.set(
+                    f"Installed target: {describe_target_codex_home(Path(self.codex_home_var.get()).expanduser().resolve())}"
+                )
+                self.account_status_var.set(
+                    "Create .\\accounts\\<name>\\config.toml and auth.json, or browse to an existing source directory."
+                )
+                self.sync_controls()
+                return
+            self.accounts_root_var.set(str(detected))
+            raw_root = str(detected)
+
+        try:
+            resolved_root = resolve_accounts_root(Path(raw_root))
+            accounts = list_account_sources(resolved_root)
+        except AccountSwitchError as exc:
+            self.accounts = []
+            self.account_index = {}
+            self.selected_account_var.set("")
+            self.account_combo.configure(values=[])
+            self.active_account_var.set("Active match: unavailable")
+            self.installed_account_var.set(
+                f"Installed target: {describe_target_codex_home(Path(self.codex_home_var.get()).expanduser().resolve())}"
+            )
+            self.account_status_var.set(f"Account source error: {exc}")
+            self.sync_controls()
+            if show_message_on_error:
+                messagebox.showerror("Account source error", str(exc), parent=self.root)
+            return
+
+        self.accounts = accounts
+        self.account_index = {account.name: account for account in accounts}
+        account_names = [account.name for account in accounts]
+        self.account_combo.configure(values=account_names)
+        self.accounts_root_var.set(str(resolved_root))
+
+        target_codex_home = Path(self.codex_home_var.get()).expanduser().resolve()
+        active_account = find_matching_target_account(accounts, target_codex_home)
+        current_selection = self.selected_account_var.get().strip()
+
+        if active_account and active_account in self.account_index:
+            self.selected_account_var.set(active_account)
+        elif current_selection in self.account_index:
+            self.selected_account_var.set(current_selection)
+        elif account_names:
+            self.selected_account_var.set(account_names[0])
+        else:
+            self.selected_account_var.set("")
+
+        self.active_account_var.set(
+            f"Active match: {active_account if active_account else 'no exact source match'}"
+        )
+        self.installed_account_var.set(
+            f"Installed target: {describe_target_codex_home(target_codex_home)}"
+        )
+
+        if not accounts:
+            self.account_status_var.set(
+                f"No switchable accounts found under {resolved_root}. "
+                "Expected subdirectories containing config.toml and auth.json."
+            )
+        else:
+            self.update_selected_account_status()
+
+        self.sync_controls()
+
+    def update_selected_account_status(self) -> None:
+        selected_name = self.selected_account_var.get().strip()
+        selected_account = self.account_index.get(selected_name)
+        if selected_account is None:
+            if self.accounts:
+                self.account_status_var.set(
+                    f"Found {len(self.accounts)} account source(s) under {self.accounts_root_var.get().strip()}."
+                )
+            else:
+                self.account_status_var.set("No switchable accounts are available.")
+            return
+
+        self.account_status_var.set(
+            f"Selected source: {selected_account.description} | {selected_account.directory}"
+        )
+
+    def on_account_selected(self, _event: tk.Event[tk.Misc]) -> None:
+        self.update_selected_account_status()
+
+    def on_account_submitted(self, _event: tk.Event[tk.Misc]) -> None:
+        self.update_selected_account_status()
+
+    def open_transfer_dialog(self) -> None:
+        if self.busy_count > 0:
+            return
+        if not self.accounts:
+            messagebox.showerror(
+                "Transfer unavailable",
+                "No switchable accounts are available. Refresh accounts first.",
+                parent=self.root,
+            )
+            return
+        if self.transfer_dialog is not None and self.transfer_dialog.root.winfo_exists():
+            self.transfer_dialog.root.deiconify()
+            self.transfer_dialog.root.lift()
+            self.transfer_dialog.root.focus_force()
+            return
+        self.transfer_dialog = ConversationTransferDialog(self)
+
+    def start_account_switch(self) -> None:
+        if self.busy_count > 0:
+            return
+
+        account_name = self.selected_account_var.get().strip()
+        if not account_name:
+            messagebox.showerror("Switch failed", "Select an account first.", parent=self.root)
+            return
+
+        codex_home = Path(self.codex_home_var.get()).expanduser().resolve()
+        prompt = (
+            "Switch Codex account now?\n\n"
+            f"Account: {account_name}\n"
+            f"Target:  {codex_home}\n\n"
+            "This will overwrite config.toml and auth.json in the target Codex home.\n"
+            "If target files already exist, a backup folder will be created automatically."
+        )
+        if not messagebox.askyesno("Confirm account switch", prompt, parent=self.root):
+            return
+
+        self.begin_task(f"Switching account {account_name}...")
+
+        def worker() -> None:
+            try:
+                resolved_root = resolve_accounts_root(Path(self.accounts_root_var.get()).expanduser().resolve())
+                accounts = list_account_sources(resolved_root)
+                selected_account = resolve_account_source(accounts, account_name)
+                result = switch_account(selected_account, codex_home)
+                restart_status, restart_error = restart_codex_desktop_app()
+            except Exception as exc:  # noqa: BLE001
+                error_message = str(exc)
+                self.root.after(
+                    0,
+                    lambda message=error_message: self.finish_account_switch(
+                        None,
+                        "",
+                        "",
+                        message,
+                    ),
+                )
+                return
+
+            self.root.after(
+                0,
+                lambda: self.finish_account_switch(
+                    result,
+                    restart_status,
+                    restart_error,
+                    None,
+                ),
+            )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def finish_account_switch(
+        self,
+        result,
+        restart_status: str,
+        restart_error: str,
+        error_message: str | None,
+    ) -> None:
+        self.end_task()
+
+        if error_message:
+            self.status_var.set("Account switch failed.")
+            messagebox.showerror("Account switch failed", error_message, parent=self.root)
+            return
+
+        if result is None:
+            self.status_var.set("Account switch failed.")
+            messagebox.showerror("Account switch failed", "No switch result was returned.", parent=self.root)
+            return
+
+        self.refresh_accounts()
+        self.status_var.set(f"Switched account to {result.account_name}.")
+
+        lines = [
+            f"Switched account: {result.account_name}",
+            f"Source folder:    {result.source_dir}",
+            f"Target folder:    {result.target_dir}",
+        ]
+        if result.backup_dir is not None:
+            lines.append(f"Backup folder:    {result.backup_dir}")
+        else:
+            lines.append("Backup folder:    not created (target files did not already exist)")
+
+        if restart_status == "restarted":
+            lines.append("Desktop app:      Codex App was restarted.")
+        elif restart_status == "not_running":
+            lines.append("Desktop app:      Codex App was not running.")
+        else:
+            lines.append("Desktop app:      Automatic restart failed.")
+            if restart_error:
+                lines.append(f"Restart warning:  {restart_error}")
+
+        messagebox.showinfo("Account switched", "\n".join(lines), parent=self.root)
+        self.status_var.set(f"Switched account to {result.account_name}. Refreshing conversations...")
+        self.refresh_sessions()
 
     def begin_task(self, status: str) -> None:
         self.busy_count += 1
@@ -988,10 +1284,22 @@ class ForkGuiApp:
             if self.busy_count > 0 or self.current_session() is None or self.current_turn() is None
             else tk.NORMAL
         )
+        self.transfer_button.configure(
+            state=tk.DISABLED if self.busy_count > 0 or not self.accounts else tk.NORMAL
+        )
+        self.account_refresh_button.configure(state=state)
+        self.account_switch_button.configure(
+            state=tk.DISABLED
+            if self.busy_count > 0 or not self.selected_account_var.get().strip() or not self.accounts
+            else tk.NORMAL
+        )
         self.codex_home_entry.configure(state=state)
         self.codex_home_browse_button.configure(state=state)
         self.workdir_combo.configure(state=state)
         self.workdir_browse_button.configure(state=state)
+        self.accounts_root_entry.configure(state=state)
+        self.accounts_root_browse_button.configure(state=state)
+        self.account_combo.configure(state=state)
         self.minimize_to_tray_checkbutton.configure(state=state)
 
     def handle_workdir_change(self, *, show_error: bool) -> None:
@@ -1042,6 +1350,7 @@ class ForkGuiApp:
                 last_workdir=state_workdir,
                 recent_workdirs=self.remembered_workdirs,
                 minimize_to_tray_on_close=bool(self.minimize_to_tray_var.get()),
+                max_remembered_workdirs=MAX_REMEMBERED_WORKDIRS,
             )
         except OSError:
             self.status_var.set("Workdir was updated, but the GUI state file could not be saved.")
@@ -1361,6 +1670,36 @@ class ForkGuiApp:
             return None
         return self.turn_index.get(selection[0])
 
+    def get_active_account_name(self) -> str | None:
+        try:
+            codex_home = Path(self.codex_home_var.get()).expanduser().resolve()
+        except OSError:
+            return None
+        return find_matching_target_account(self.accounts, codex_home)
+
+    def handle_transfer_complete(
+        self,
+        result: ConversationCopyResult,
+        restart_status: str,
+        restart_error: str,
+    ) -> None:
+        active_account = self.get_active_account_name()
+        if active_account == result.target_account:
+            preferred_thread_id = result.imported_thread_ids[0] if result.imported_thread_ids else None
+            self.status_var.set(
+                f"Copied {result.imported_count} conversation(s) to {result.target_account}. Refreshing conversations..."
+            )
+            self.refresh_sessions(preferred_thread_id=preferred_thread_id)
+            return
+
+        self.status_var.set(
+            f"Copied {result.imported_count} conversation(s) to {result.target_account}."
+        )
+        if restart_status == "failed" and restart_error:
+            self.status_var.set(
+                f"Copied {result.imported_count} conversation(s) to {result.target_account}. Restart failed: {restart_error}"
+            )
+
     def start_fork(self) -> None:
         if self.busy_count > 0:
             return
@@ -1507,6 +1846,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Graphical Codex any-node fork tool")
     parser.add_argument("--codex-home", type=Path, default=DEFAULT_CODEX_HOME, help="Codex home directory")
     parser.add_argument("--workdir", type=Path, help="Target working directory; defaults to the remembered GUI workdir or current directory")
+    parser.add_argument("--accounts-root", type=Path, help="Directory containing one subdirectory per switchable account")
     return parser
 
 
@@ -1514,12 +1854,16 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     codex_home = args.codex_home.expanduser().resolve()
-    gui_state = load_gui_state()
+    gui_state = load_gui_state(
+        normalize_workdir=normalize_workdir,
+        max_remembered_workdirs=MAX_REMEMBERED_WORKDIRS,
+    )
     if args.workdir is not None:
         workdir = args.workdir.expanduser().resolve()
     else:
         remembered_workdir = str(gui_state.get("last_workdir") or "").strip()
         workdir = Path(remembered_workdir).expanduser().resolve() if remembered_workdir else Path.cwd().resolve()
+    accounts_root = args.accounts_root.expanduser().resolve() if args.accounts_root is not None else None
 
     try:
         root = tk.Tk()
@@ -1532,6 +1876,7 @@ def main(argv: list[str] | None = None) -> int:
         root,
         codex_home,
         workdir,
+        accounts_root,
         remembered_workdirs if isinstance(remembered_workdirs, list) else [],
         bool(gui_state.get("minimize_to_tray_on_close")),
     )

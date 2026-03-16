@@ -20,6 +20,24 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
+from account_switcher import (
+    AccountSourceSummary,
+    AccountSwitchError,
+    describe_target_codex_home,
+    find_matching_target_account,
+    list_account_sources,
+    resolve_account_source,
+    resolve_accounts_root,
+    switch_account,
+)
+from desktop_app import restart_codex_desktop_app
+from transfer_cli import (
+    TransferCliError,
+    assign_transfer_conversations_cli,
+    copy_transfer_conversations_cli,
+    list_transfer_view_cli,
+)
+
 
 SESSION_GLOB = "rollout-*.jsonl"
 DEFAULT_CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
@@ -67,6 +85,24 @@ class UserTurnSummary:
 
 def normalize_path(path_value: str | Path) -> str:
     return str(Path(path_value).expanduser().resolve()).rstrip("\\/")
+
+
+def strip_windows_extended_path_prefix(path_value: str) -> str:
+    if path_value.startswith("\\\\?\\UNC\\"):
+        return "\\" + path_value[7:]
+    if path_value.startswith("\\\\?\\"):
+        return path_value[4:]
+    return path_value
+
+
+def normalize_optional_path(path_value: str | Path) -> str:
+    text = strip_windows_extended_path_prefix(str(path_value).strip())
+    if not text:
+        return ""
+    try:
+        return normalize_path(text)
+    except OSError:
+        return text.rstrip("\\/")
 
 
 def shorten(text: str, limit: int = 100) -> str:
@@ -166,7 +202,54 @@ def parse_session_summary(rollout_path: Path) -> SessionSummary | None:
     )
 
 
-def find_sessions(codex_home: Path, workdir: str) -> list[SessionSummary]:
+def parse_session_summary_from_thread_data(thread_obj: object) -> SessionSummary | None:
+    if not isinstance(thread_obj, dict):
+        return None
+
+    thread_id = str(thread_obj.get("id") or "").strip()
+    if not thread_id:
+        return None
+
+    raw_cwd = str(thread_obj.get("cwd") or "").strip()
+    raw_path = str(thread_obj.get("path") or "").strip()
+    title = str(thread_obj.get("name") or thread_obj.get("preview") or thread_id).strip()
+    preview = str(thread_obj.get("preview") or "").strip()
+    created_at_raw = thread_obj.get("createdAt")
+    updated_at_raw = thread_obj.get("updatedAt")
+
+    try:
+        created_at = (
+            datetime.fromtimestamp(float(created_at_raw)).isoformat()
+            if created_at_raw is not None
+            else ""
+        )
+    except (TypeError, ValueError, OSError):
+        created_at = ""
+
+    try:
+        updated_at = float(updated_at_raw)
+    except (TypeError, ValueError):
+        return None
+
+    rollout_path = Path(strip_windows_extended_path_prefix(raw_path)) if raw_path else Path()
+    if raw_path:
+        try:
+            rollout_path = rollout_path.expanduser().resolve()
+        except OSError:
+            rollout_path = Path(strip_windows_extended_path_prefix(raw_path))
+
+    return SessionSummary(
+        thread_id=thread_id,
+        rollout_path=rollout_path,
+        cwd=normalize_optional_path(raw_cwd),
+        created_at=created_at,
+        updated_at=updated_at,
+        title=shorten(title, 80),
+        first_user_message=preview,
+    )
+
+
+def find_sessions_from_rollouts(codex_home: Path, workdir: str) -> list[SessionSummary]:
     sessions_root = codex_home / "sessions"
     if not sessions_root.exists():
         raise ForkToolError(f"Codex sessions directory not found: {sessions_root}")
@@ -188,6 +271,44 @@ def find_sessions(codex_home: Path, workdir: str) -> list[SessionSummary]:
             latest_by_thread[summary.thread_id] = summary
 
     return sorted(latest_by_thread.values(), key=lambda item: item.updated_at, reverse=True)
+
+
+def find_sessions_from_current_account(workdir: str) -> list[SessionSummary]:
+    normalized_workdir = normalize_path(workdir) if workdir.strip() else ""
+    latest_by_thread: dict[str, SessionSummary] = {}
+    client = CodexAppServerClient()
+
+    try:
+        response = client.request("thread/list", {})
+    finally:
+        client.stop()
+
+    result = response.get("result")
+    if not isinstance(result, dict):
+        raise ForkToolError("thread/list returned an unexpected payload")
+
+    data = result.get("data")
+    if not isinstance(data, list):
+        raise ForkToolError("thread/list returned no data array")
+
+    for thread_obj in data:
+        summary = parse_session_summary_from_thread_data(thread_obj)
+        if summary is None:
+            continue
+        if normalized_workdir and summary.cwd != normalized_workdir:
+            continue
+        previous = latest_by_thread.get(summary.thread_id)
+        if previous is None or summary.updated_at > previous.updated_at:
+            latest_by_thread[summary.thread_id] = summary
+
+    return sorted(latest_by_thread.values(), key=lambda item: item.updated_at, reverse=True)
+
+
+def find_sessions(codex_home: Path, workdir: str) -> list[SessionSummary]:
+    try:
+        return find_sessions_from_current_account(workdir)
+    except Exception:  # noqa: BLE001
+        return find_sessions_from_rollouts(codex_home, workdir)
 
 
 def parse_turns_from_rollout(rollout_path: Path) -> list[TurnSummary]:
@@ -692,73 +813,82 @@ def wait_for_key(prompt: str = "Press any key to continue...") -> None:
     msvcrt.getwch()
 
 
-def find_running_codex_desktop_executable() -> str:
-    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    result = subprocess.run(
-        [
-            "powershell",
-            "-NoProfile",
-            "-Command",
-            (
-                "Get-CimInstance Win32_Process | "
-                "Where-Object { "
-                "$_.Name -eq 'Codex.exe' -and "
-                "$_.ExecutablePath -like '*Codex.exe' -and "
-                "$_.ExecutablePath -notlike '*\\\\resources\\\\codex.exe' -and "
-                "$_.CommandLine -notlike '*--type=*' "
-                "} | "
-                "Select-Object -First 1 -ExpandProperty ExecutablePath"
-            ),
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        creationflags=creationflags,
-        check=False,
-    )
-    return result.stdout.strip()
+def clear_screen() -> None:
+    os.system("cls")
 
 
-def restart_codex_desktop_app() -> tuple[str, str]:
-    executable_path = find_running_codex_desktop_executable()
-    if not executable_path:
-        return "not_running", ""
+def read_key() -> str:
+    key = msvcrt.getwch()
+    if key in ("\x00", "\xe0"):
+        code = msvcrt.getwch()
+        return {"H": "up", "P": "down"}.get(code, "")
+    if key == "\r":
+        return "enter"
+    if key == "\x08":
+        return "back"
+    if key == "\x1b":
+        return "escape"
+    if key in {"q", "Q"}:
+        return "quit"
+    return key
 
-    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    try:
-        subprocess.run(
-            [
-                "powershell",
-                "-NoProfile",
-                "-Command",
-                (
-                    f"$exe = '{executable_path}'; "
-                    "Get-CimInstance Win32_Process | "
-                    "Where-Object { $_.ExecutablePath -eq $exe } | "
-                    "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
-                ),
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=creationflags,
-            check=False,
-        )
-        time.sleep(1.5)
-        subprocess.run(
-            [
-                "powershell",
-                "-NoProfile",
-                "-Command",
-                f"Start-Process -FilePath '{executable_path}'",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=creationflags,
-            check=False,
-        )
-        return "restarted", ""
-    except Exception as exc:  # noqa: BLE001
-        return "failed", str(exc)
+
+def wait_for_key(prompt: str = "Press any key to continue...") -> None:
+    print()
+    print(prompt)
+    msvcrt.getwch()
+
+
+def clear_screen() -> None:
+    os.system("cls")
+
+
+def read_key() -> str:
+    key = msvcrt.getwch()
+    if key in ("\x00", "\xe0"):
+        code = msvcrt.getwch()
+        return {"H": "up", "P": "down"}.get(code, "")
+    if key == "\r":
+        return "enter"
+    if key == "\x08":
+        return "back"
+    if key == "\x1b":
+        return "escape"
+    if key in {"q", "Q"}:
+        return "quit"
+    return key
+
+
+def wait_for_key(prompt: str = "Press any key to continue...") -> None:
+    print()
+    print(prompt)
+    msvcrt.getwch()
+
+
+def clear_screen() -> None:
+    os.system("cls")
+
+
+def read_key() -> str:
+    key = msvcrt.getwch()
+    if key in ("\x00", "\xe0"):
+        code = msvcrt.getwch()
+        return {"H": "up", "P": "down"}.get(code, "")
+    if key == "\r":
+        return "enter"
+    if key == "\x08":
+        return "back"
+    if key == "\x1b":
+        return "escape"
+    if key in {"q", "Q"}:
+        return "quit"
+    return key
+
+
+def wait_for_key(prompt: str = "Press any key to continue...") -> None:
+    print()
+    print(prompt)
+    msvcrt.getwch()
 
 
 def format_detail(text: str, width: int, max_lines: int = 14) -> str:
@@ -886,6 +1016,92 @@ def load_user_turns_for_session(
     return user_turns, app_server_error
 
 
+def load_switchable_accounts(
+    accounts_root: Path | None,
+) -> tuple[Path, list[AccountSourceSummary]]:
+    try:
+        resolved_root = resolve_accounts_root(accounts_root)
+        accounts = list_account_sources(resolved_root)
+    except AccountSwitchError as exc:
+        raise ForkToolError(str(exc)) from exc
+
+    if not accounts:
+        raise ForkToolError(
+            f"No switchable accounts were found under {resolved_root}. "
+            "Expected subdirectories containing config.toml and auth.json."
+        )
+    return resolved_root, accounts
+
+
+def list_accounts(codex_home: Path, accounts_root: Path | None) -> int:
+    resolved_root, accounts = load_switchable_accounts(accounts_root)
+    active_account = find_matching_target_account(accounts, codex_home)
+    current_target = describe_target_codex_home(codex_home)
+
+    print(f"Account root: {resolved_root}")
+    print(f"Target Codex home: {codex_home}")
+    print(f"Current target files: {current_target}")
+    print()
+    print("Accounts:")
+    for account in accounts:
+        marker = "*" if account.name == active_account else " "
+        print(f"{marker} {account.name}\t{account.description}\t{account.directory}")
+
+    print()
+    if active_account:
+        print(f"Active account: {active_account}")
+    else:
+        print("Active account: no exact source match")
+    return 0
+
+
+def run_account_switch(
+    codex_home: Path,
+    accounts_root: Path | None,
+    account_name: str,
+    *,
+    restart_codex: bool,
+) -> int:
+    resolved_root, accounts = load_switchable_accounts(accounts_root)
+    try:
+        selected_account = resolve_account_source(accounts, account_name)
+        result = switch_account(selected_account, codex_home)
+    except AccountSwitchError as exc:
+        raise ForkToolError(str(exc)) from exc
+
+    restart_status = "skipped"
+    restart_error = ""
+    if restart_codex:
+        restart_status, restart_error = restart_codex_desktop_app()
+
+    print(f"Switched account: {result.account_name}")
+    print(f"Account root:     {resolved_root}")
+    print(f"Source folder:    {result.source_dir}")
+    print(f"Target folder:    {result.target_dir}")
+    print("Copied files:")
+    for copied_file in result.copied_files:
+        print(f"  - {copied_file}")
+
+    if result.backup_dir is not None:
+        print(f"Backup folder:    {result.backup_dir}")
+    else:
+        print("Backup folder:    not created (target files did not already exist)")
+
+    if restart_codex:
+        if restart_status == "restarted":
+            print("Desktop app:      Codex App was restarted.")
+        elif restart_status == "not_running":
+            print("Desktop app:      Codex App was not running.")
+        else:
+            print("Desktop app:      Automatic restart failed.")
+            if restart_error:
+                print(f"Restart warning:  {restart_error}")
+    else:
+        print("Desktop app:      restart skipped by flag")
+
+    return 0
+
+
 def confirm_fork(session: SessionSummary, turn: UserTurnSummary) -> bool:
     while True:
         width, _ = shutil.get_terminal_size((120, 30))
@@ -1005,7 +1221,7 @@ def show_result(result: dict[str, str | int | bool]) -> None:
     wait_for_key()
 
 
-def run_gui(codex_home: Path, workdir: Path | None) -> int:
+def run_gui(codex_home: Path, workdir: Path | None, accounts_root: Path | None) -> int:
     if os.name == "nt":
         pythonw = Path(sys.executable).with_name("pythonw.exe")
         gui_script = Path(__file__).with_name("fork_gui.py")
@@ -1018,6 +1234,8 @@ def run_gui(codex_home: Path, workdir: Path | None) -> int:
             ]
             if workdir is not None:
                 argv.extend(["--workdir", str(workdir)])
+            if accounts_root is not None:
+                argv.extend(["--accounts-root", str(accounts_root.expanduser().resolve())])
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             try:
                 subprocess.Popen(
@@ -1038,6 +1256,8 @@ def run_gui(codex_home: Path, workdir: Path | None) -> int:
     ]
     if workdir is not None:
         argv.extend(["--workdir", str(workdir)])
+    if accounts_root is not None:
+        argv.extend(["--accounts-root", str(accounts_root.expanduser().resolve())])
     return gui_main(argv)
 
 
@@ -1103,6 +1323,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gui", action="store_true", help="Launch the graphical interface")
     parser.add_argument("--codex-home", type=Path, default=DEFAULT_CODEX_HOME, help="Codex home directory")
     parser.add_argument("--workdir", type=Path, help="Target working directory; defaults to current directory")
+    parser.add_argument("--accounts-root", type=Path, help="Directory containing one subdirectory per switchable account")
+    parser.add_argument("--list-accounts", action="store_true", help="List switchable Codex account sources")
+    parser.add_argument("--switch-account", metavar="NAME", help="Switch Codex account by copying NAME\\config.toml and auth.json into codex_home")
+    parser.add_argument("--list-transfer-view", action="store_true", help="List local transfer conversations grouped by assigned account for the current workdir")
+    parser.add_argument("--assign-conversations-to", metavar="NAME", help="Assign selected conversations to NAME in the transfer mapping")
+    parser.add_argument("--copy-conversations-to", metavar="NAME", help="Copy selected conversations to NAME")
+    parser.add_argument("--transfer-sources", nargs="+", metavar="SOURCE", help="Thread IDs or rollout paths used by transfer assignment/copy commands")
+    parser.add_argument("--no-restart-codex", action="store_true", help="Skip automatic Codex Desktop restart after switching accounts")
     return parser
 
 
@@ -1114,15 +1342,91 @@ def main() -> int:
         args.list_sessions = True
 
     workdir = args.workdir.expanduser().resolve() if args.workdir is not None else Path.cwd().resolve()
+    codex_home = args.codex_home.expanduser().resolve()
+
+    if args.transfer_sources and not (args.assign_conversations_to or args.copy_conversations_to):
+        parser.error("--transfer-sources requires --assign-conversations-to or --copy-conversations-to.")
+
+    selected_actions = sum(
+        int(bool(option))
+        for option in (
+            args.list_sessions,
+            args.gui,
+            args.list_accounts,
+            args.switch_account,
+            args.list_transfer_view,
+            args.assign_conversations_to,
+            args.copy_conversations_to,
+        )
+    )
+    if selected_actions > 1:
+        parser.error("Choose only one primary action at a time.")
+
+    if args.list_accounts:
+        try:
+            return list_accounts(codex_home, args.accounts_root)
+        except ForkToolError as exc:
+            clear_screen()
+            print(f"Error: {exc}")
+            return 2
+
+    if args.switch_account:
+        try:
+            return run_account_switch(
+                codex_home,
+                args.accounts_root,
+                args.switch_account,
+                restart_codex=not args.no_restart_codex,
+            )
+        except ForkToolError as exc:
+            print(f"Error: {exc}")
+            return 2
+
+    if args.list_transfer_view:
+        try:
+            return list_transfer_view_cli(codex_home, workdir, args.accounts_root)
+        except (ForkToolError, TransferCliError) as exc:
+            print(f"Error: {exc}")
+            return 2
+
+    if args.assign_conversations_to:
+        if not args.transfer_sources:
+            parser.error("--assign-conversations-to requires --transfer-sources.")
+        try:
+            return assign_transfer_conversations_cli(
+                codex_home,
+                workdir,
+                args.accounts_root,
+                args.assign_conversations_to,
+                args.transfer_sources,
+            )
+        except (ForkToolError, TransferCliError) as exc:
+            print(f"Error: {exc}")
+            return 2
+
+    if args.copy_conversations_to:
+        if not args.transfer_sources:
+            parser.error("--copy-conversations-to requires --transfer-sources.")
+        try:
+            return copy_transfer_conversations_cli(
+                codex_home,
+                workdir,
+                args.accounts_root,
+                args.copy_conversations_to,
+                args.transfer_sources,
+                restart_codex=not args.no_restart_codex,
+            )
+        except (ForkToolError, TransferCliError) as exc:
+            print(f"Error: {exc}")
+            return 2
 
     if args.gui:
         explicit_workdir = args.workdir.expanduser().resolve() if args.workdir is not None else None
-        return run_gui(args.codex_home.expanduser().resolve(), explicit_workdir)
+        return run_gui(codex_home, explicit_workdir, args.accounts_root)
 
     if not args.list_sessions:
         parser.error("Use `fork -ls` to start interactive selection.")
 
-    codex_home = args.codex_home.expanduser().resolve()
     try:
         return run_interactive(codex_home, workdir)
     except ForkToolError as exc:

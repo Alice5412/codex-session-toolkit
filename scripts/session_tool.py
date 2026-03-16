@@ -522,32 +522,14 @@ def cmd_delete(args: argparse.Namespace) -> int:
 
 
 def cmd_package(args: argparse.Namespace) -> int:
-    entries = collect_package_entries(args.codex_home, args.sources, args.default_provider)
-    if not entries:
-        raise SessionToolError("no sessions matched for packaging")
-
-    output = args.output.expanduser().resolve()
-    ensure_parent(output)
-    manifest = {
-        "format": 1,
-        "created_at": format_session_timestamp(utc_now()),
-        "source_codex_home": str(args.codex_home),
-        "sessions": entries,
-    }
-    with tarfile.open(output, "w:gz") as archive:
-        payload = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
-        info = tarfile.TarInfo(name=manifest_name())
-        info.size = len(payload)
-        with tempfile.SpooledTemporaryFile() as handle:
-            handle.write(payload)
-            handle.seek(0)
-            archive.addfile(info, handle)
-        for entry in entries:
-            relpath = Path(str(entry["rollout_relpath"]))
-            src = args.codex_home / relpath
-            archive.add(src, arcname=str(relpath))
+    entries = package_sessions_archive(
+        args.codex_home,
+        args.sources,
+        args.output,
+        default_provider=args.default_provider,
+    )
     print(f"packaged {len(entries)} session(s)")
-    print(output)
+    print(args.output.expanduser().resolve())
     return 0
 
 
@@ -557,7 +539,7 @@ def choose_import_target(
     *,
     preserve_ids: bool,
     provider_override: str | None,
-) -> tuple[Path, dict[str, str], str]:
+) -> tuple[Path, dict[str, str], str, str]:
     original_thread_id = str(entry["thread_id"])
     created_at = parse_iso_utc(str(entry["created_at"]))
     archived = bool(entry["archived"])
@@ -570,15 +552,56 @@ def choose_import_target(
         thread_id=target_thread_id,
     )
     replacements = {original_thread_id: target_thread_id}
-    return dst, replacements, target_provider
+    return dst, replacements, target_provider, target_thread_id
 
 
-def cmd_unpack(args: argparse.Namespace) -> int:
-    archive_path = args.archive.expanduser().resolve()
+def package_sessions_archive(
+    codex_home: Path,
+    sources: list[str],
+    output: Path,
+    *,
+    default_provider: str = "openai",
+) -> list[dict[str, object]]:
+    entries = collect_package_entries(codex_home, sources, default_provider)
+    if not entries:
+        raise SessionToolError("no sessions matched for packaging")
+
+    output = output.expanduser().resolve()
+    ensure_parent(output)
+    manifest = {
+        "format": 1,
+        "created_at": format_session_timestamp(utc_now()),
+        "source_codex_home": str(codex_home),
+        "sessions": entries,
+    }
+    with tarfile.open(output, "w:gz") as archive:
+        payload = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
+        info = tarfile.TarInfo(name=manifest_name())
+        info.size = len(payload)
+        with tempfile.SpooledTemporaryFile() as handle:
+            handle.write(payload)
+            handle.seek(0)
+            archive.addfile(info, handle)
+        for entry in entries:
+            relpath = Path(str(entry["rollout_relpath"]))
+            src = codex_home / relpath
+            archive.add(src, arcname=relpath.as_posix())
+    return entries
+
+
+def unpack_sessions_archive(
+    codex_home: Path,
+    archive_path: Path,
+    *,
+    default_provider: str = "openai",
+    target_provider: str | None = None,
+    preserve_ids: bool = False,
+) -> list[dict[str, object]]:
+    archive_path = archive_path.expanduser().resolve()
     if not archive_path.exists():
         raise SessionToolError(f"archive not found: {archive_path}")
 
-    imported = 0
+    imported: list[dict[str, object]] = []
     with tarfile.open(archive_path, "r:gz") as archive:
         try:
             manifest_member = archive.getmember(manifest_name())
@@ -596,14 +619,16 @@ def cmd_unpack(args: argparse.Namespace) -> int:
             if not isinstance(entry, dict):
                 raise SessionToolError("invalid manifest: bad session entry")
             relpath = Path(str(entry["rollout_relpath"]))
-            member = archive.extractfile(str(relpath))
+            member = archive.extractfile(relpath.as_posix())
+            if member is None:
+                member = archive.extractfile(str(relpath))
             if member is None:
                 raise SessionToolError(f"archive member missing: {relpath}")
-            dst, replacements, provider = choose_import_target(
-                args.codex_home,
+            dst, replacements, provider, target_thread_id = choose_import_target(
+                codex_home,
                 entry,
-                preserve_ids=args.preserve_ids,
-                provider_override=args.target_provider,
+                preserve_ids=preserve_ids,
+                provider_override=target_provider,
             )
             ensure_parent(dst)
             with tempfile.NamedTemporaryFile(
@@ -615,22 +640,41 @@ def cmd_unpack(args: argparse.Namespace) -> int:
                 rewrite_rollout(
                     tmp_path,
                     dst,
-                    replacements=replacements if not args.preserve_ids else None,
+                    replacements=replacements if not preserve_ids else None,
                     target_provider=provider,
                 )
             finally:
                 if tmp_path.exists():
                     tmp_path.unlink()
-            imported += 1
+            imported.append(
+                {
+                    "original_thread_id": str(entry["thread_id"]),
+                    "thread_id": target_thread_id,
+                    "rollout_path": str(dst.resolve()),
+                    "model_provider": provider,
+                    "archived": bool(entry["archived"]),
+                }
+            )
 
     reindex_args = argparse.Namespace(
-        codex_home=args.codex_home,
-        default_provider=args.default_provider,
+        codex_home=codex_home,
+        default_provider=default_provider,
         provider=None,
         prune_missing=False,
     )
     cmd_reindex(reindex_args)
-    print(f"unpacked {imported} session(s)")
+    return imported
+
+
+def cmd_unpack(args: argparse.Namespace) -> int:
+    imported = unpack_sessions_archive(
+        args.codex_home,
+        args.archive,
+        default_provider=args.default_provider,
+        target_provider=args.target_provider,
+        preserve_ids=args.preserve_ids,
+    )
+    print(f"unpacked {len(imported)} session(s)")
     return 0
 
 
