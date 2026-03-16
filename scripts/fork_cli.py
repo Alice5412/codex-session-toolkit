@@ -1221,44 +1221,26 @@ def show_result(result: dict[str, str | int | bool]) -> None:
     wait_for_key()
 
 
-def run_gui(codex_home: Path, workdir: Path | None, accounts_root: Path | None) -> int:
-    if os.name == "nt":
-        pythonw = Path(sys.executable).with_name("pythonw.exe")
-        gui_script = Path(__file__).with_name("fork_gui.py")
-        if pythonw.exists():
-            argv = [
-                str(pythonw),
-                str(gui_script),
-                "--codex-home",
-                str(codex_home),
-            ]
-            if workdir is not None:
-                argv.extend(["--workdir", str(workdir)])
-            if accounts_root is not None:
-                argv.extend(["--accounts-root", str(accounts_root.expanduser().resolve())])
-            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            try:
-                subprocess.Popen(
-                    argv,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    creationflags=creationflags,
-                )
-                return 0
-            except OSError:
-                pass
 
-    from fork_gui import main as gui_main
+def run_webui(
+    codex_home: Path,
+    workdir: Path | None,
+    accounts_root: Path | None,
+    *,
+    host: str,
+    port: int,
+    open_browser: bool,
+) -> int:
+    from webui.server import run_webui_server
 
-    argv = [
-        "--codex-home",
-        str(codex_home),
-    ]
-    if workdir is not None:
-        argv.extend(["--workdir", str(workdir)])
-    if accounts_root is not None:
-        argv.extend(["--accounts-root", str(accounts_root.expanduser().resolve())])
-    return gui_main(argv)
+    return run_webui_server(
+        codex_home=codex_home,
+        initial_workdir=workdir,
+        accounts_root=accounts_root,
+        host=host,
+        port=port,
+        open_browser=open_browser,
+    )
 
 
 def run_interactive(codex_home: Path, workdir: Path) -> int:
@@ -1320,7 +1302,10 @@ def run_interactive(codex_home: Path, workdir: Path) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Interactive Codex session toolkit")
     parser.add_argument("-ls", "--list-sessions", action="store_true", help="List conversations for the current working directory")
-    parser.add_argument("--gui", action="store_true", help="Launch the graphical interface")
+    parser.add_argument("--webui", action="store_true", help="Launch the local Web UI")
+    parser.add_argument("--host", default="127.0.0.1", help="Bind address used by the local Web UI server")
+    parser.add_argument("--port", type=int, default=8765, help="Port used by the local Web UI server; use 0 for an automatic port")
+    parser.add_argument("--no-browser", action="store_true", help="Do not open a browser when launching the local Web UI")
     parser.add_argument("--codex-home", type=Path, default=DEFAULT_CODEX_HOME, help="Codex home directory")
     parser.add_argument("--workdir", type=Path, help="Target working directory; defaults to current directory")
     parser.add_argument("--accounts-root", type=Path, help="Directory containing one subdirectory per switchable account")
@@ -1332,7 +1317,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--transfer-sources", nargs="+", metavar="SOURCE", help="Thread IDs or rollout paths used by transfer assignment/copy commands")
     parser.add_argument("--no-restart-codex", action="store_true", help="Skip automatic Codex Desktop restart after switching accounts")
     return parser
-
 
 def main() -> int:
     parser = build_parser()
@@ -1351,7 +1335,7 @@ def main() -> int:
         int(bool(option))
         for option in (
             args.list_sessions,
-            args.gui,
+            args.webui,
             args.list_accounts,
             args.switch_account,
             args.list_transfer_view,
@@ -1361,6 +1345,17 @@ def main() -> int:
     )
     if selected_actions > 1:
         parser.error("Choose only one primary action at a time.")
+
+    if args.webui:
+        explicit_workdir = args.workdir.expanduser().resolve() if args.workdir is not None else None
+        return run_webui(
+            codex_home,
+            explicit_workdir,
+            args.accounts_root,
+            host=args.host,
+            port=args.port,
+            open_browser=not args.no_browser,
+        )
 
     if args.list_accounts:
         try:
@@ -1420,9 +1415,6 @@ def main() -> int:
             print(f"Error: {exc}")
             return 2
 
-    if args.gui:
-        explicit_workdir = args.workdir.expanduser().resolve() if args.workdir is not None else None
-        return run_gui(codex_home, explicit_workdir, args.accounts_root)
 
     if not args.list_sessions:
         parser.error("Use `fork -ls` to start interactive selection.")

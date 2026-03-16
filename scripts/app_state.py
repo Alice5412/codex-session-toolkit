@@ -7,23 +7,29 @@ from pathlib import Path
 
 
 APP_STATE_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "codex-any-node-fork"
-GUI_STATE_PATH = APP_STATE_DIR / "gui-state.json"
+WORKSPACE_STATE_PATH = APP_STATE_DIR / "workspace-state.json"
+LEGACY_WORKSPACE_STATE_PATH = APP_STATE_DIR / "gui-state.json"
 TRANSFER_STATE_PATH = APP_STATE_DIR / "account-session-map.json"
 
 
-def load_gui_state(
+def _default_workspace_state() -> dict[str, object]:
+    return {"last_workdir": "", "recent_workdirs": []}
+
+
+def load_workspace_state(
     *,
     normalize_workdir,
     max_remembered_workdirs: int,
 ) -> dict[str, object]:
-    if not GUI_STATE_PATH.exists():
-        return {"last_workdir": "", "recent_workdirs": [], "minimize_to_tray_on_close": False}
+    state_path = WORKSPACE_STATE_PATH if WORKSPACE_STATE_PATH.exists() else LEGACY_WORKSPACE_STATE_PATH
+    if not state_path.exists():
+        return _default_workspace_state()
     try:
-        data = json.loads(GUI_STATE_PATH.read_text(encoding="utf-8"))
+        data = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return {"last_workdir": "", "recent_workdirs": [], "minimize_to_tray_on_close": False}
+        return _default_workspace_state()
     if not isinstance(data, dict):
-        return {"last_workdir": "", "recent_workdirs": [], "minimize_to_tray_on_close": False}
+        return _default_workspace_state()
 
     recent = data.get("recent_workdirs")
     workdir_candidates: list[object] = []
@@ -55,24 +61,21 @@ def load_gui_state(
     return {
         "last_workdir": remembered[0] if remembered else "",
         "recent_workdirs": remembered,
-        "minimize_to_tray_on_close": bool(data.get("minimize_to_tray_on_close")),
     }
 
 
-def save_gui_state(
+def save_workspace_state(
     *,
     last_workdir: str,
     recent_workdirs: list[str],
-    minimize_to_tray_on_close: bool,
     max_remembered_workdirs: int,
 ) -> None:
     payload = {
         "last_workdir": last_workdir,
         "recent_workdirs": recent_workdirs[:max_remembered_workdirs],
-        "minimize_to_tray_on_close": minimize_to_tray_on_close,
     }
     APP_STATE_DIR.mkdir(parents=True, exist_ok=True)
-    GUI_STATE_PATH.write_text(
+    WORKSPACE_STATE_PATH.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )

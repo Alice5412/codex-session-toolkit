@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Codex Session Toolkit</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <div class="backdrop"></div>
+  <div class="backdrop backdrop-secondary"></div>
+  <div class="app-shell">
+    <header class="panel hero-panel">
+      <div>
+        <p class="eyebrow">Local session control plane</p>
+        <h1>Codex Session Toolkit</h1>
+        <p class="hero-copy" id="heroSubtitle">
+          Dracula-themed local browser interface for session browsing, account switching, transfer, and forking.
+        </p>
+      </div>
+      <div class="hero-meta">
+        <span class="badge badge-accent" id="phaseBadge">Dracula Web UI</span>
+        <span class="badge" id="activeAccountBadge">Active account: detecting...</span>
+      </div>
+    </header>
+
+    <section class="panel workspace-panel">
+      <div class="workspace-form">
+        <label class="field grow">
+          <span class="field-label">Workdir</span>
+          <input id="workdirInput" type="text" list="recentWorkdirs" placeholder="D:\workspace\project">
+          <datalist id="recentWorkdirs"></datalist>
+        </label>
+        <button class="button button-primary" id="loadWorkdirButton" type="button">Load workspace</button>
+        <button class="button" id="refreshAllButton" type="button">Refresh</button>
+      </div>
+      <div class="meta-grid">
+        <div class="meta-pill">
+          <span class="meta-label">Codex home</span>
+          <span class="meta-value" id="codexHomeValue">-</span>
+        </div>
+        <div class="meta-pill">
+          <span class="meta-label">Target profile</span>
+          <span class="meta-value" id="targetProfileValue">-</span>
+        </div>
+        <div class="meta-pill">
+          <span class="meta-label">Accounts root</span>
+          <span class="meta-value" id="accountsRootValue">-</span>
+        </div>
+      </div>
+    </section>
+
+    <div class="flash" id="flash"></div>
+
+    <main class="layout-grid">
+      <aside class="sidebar-column">
+        <section class="panel account-panel">
+          <div class="section-heading">
+            <div>
+              <p class="section-kicker">Profiles</p>
+              <h2>Account switcher</h2>
+            </div>
+          </div>
+          <p class="section-note" id="accountsNotice">Loading account sources...</p>
+          <div class="account-list" id="accountsList"></div>
+        </section>
+
+        <section class="panel transfer-panel">
+          <div class="section-heading">
+            <div>
+              <p class="section-kicker">Transfer</p>
+              <h2>Conversation transfer</h2>
+            </div>
+            <span class="badge" id="transferCountBadge">0 threads</span>
+          </div>
+
+          <div class="group-tabs" id="transferGroups"></div>
+
+          <div class="toolbar compact-toolbar">
+            <label class="field grow">
+              <span class="field-label">Target account</span>
+              <select id="transferTargetSelect"></select>
+            </label>
+          </div>
+
+          <div class="toolbar compact-toolbar">
+            <button class="button" id="assignSelectedButton" type="button">Assign selected</button>
+            <button class="button button-primary" id="copySelectedButton" type="button">Copy selected</button>
+          </div>
+
+          <p class="section-note" id="transferSelectionHint">Select one source group, then multi-select conversations to assign or copy.</p>
+          <div class="transfer-list" id="transferList"></div>
+        </section>
+      </aside>
+
+      <section class="content-column">
+        <section class="panel sessions-panel">
+          <div class="section-heading">
+            <div>
+              <p class="section-kicker">Sessions</p>
+              <h2>Workspace conversations</h2>
+            </div>
+            <span class="badge" id="sessionsCountBadge">0 sessions</span>
+          </div>
+
+          <div class="toolbar">
+            <label class="field grow">
+              <span class="field-label">Search sessions</span>
+              <input id="sessionSearchInput" type="search" placeholder="Filter by title, preview, or thread id">
+            </label>
+          </div>
+
+          <div class="session-list" id="sessionsList"></div>
+        </section>
+
+        <section class="panel turns-panel">
+          <div class="section-heading">
+            <div>
+              <p class="section-kicker">Fork target</p>
+              <h2>User turns</h2>
+            </div>
+            <span class="badge" id="turnsCountBadge">0 turns</span>
+          </div>
+          <p class="section-note" id="turnsNotice">Select a conversation to inspect its user turns and fork from a specific point.</p>
+          <div class="turns-scroll-shell">
+            <div class="turn-list" id="turnsList"></div>
+          </div>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <template id="emptyStateTemplate">
+    <div class="empty-state">
+      <h3>No data</h3>
+      <p></p>
+    </div>
+  </template>
+
+  <script src="/app.js"></script>
+</body>
+</html>

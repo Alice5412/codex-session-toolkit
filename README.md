@@ -2,7 +2,7 @@
 
 中文说明: [README_CN.md](./README_CN.md)
 
-A Windows toolkit for browsing local Codex Desktop / Codex CLI conversations by working directory, forking from any user turn, switching local account profiles, and transferring conversations between accounts. It includes both an interactive CLI and a graphical GUI.
+A Windows toolkit for browsing local Codex Desktop / Codex CLI conversations by working directory, forking from any user turn, switching local account profiles, and transferring conversations between accounts. The project now keeps a local Web UI as its only graphical frontend, with CLI utilities retained for direct operations.
 
 ## Features
 
@@ -10,7 +10,7 @@ A Windows toolkit for browsing local Codex Desktop / Codex CLI conversations by 
 - Fork from any user turn with `fork + rollback`
 - Switch local Codex account profiles
 - Transfer or copy conversations between local accounts
-- Use either the interactive CLI or the graphical GUI
+- Use the local Web UI or CLI utilities
 
 ## Requirements
 
@@ -29,46 +29,22 @@ For first-time setup, beginners can run:
 .\add_to_user_path.cmd
 ```
 
-Run:
+Launch the local Web UI:
 
 ```powershell
-codex-toolkit -ls
+codex-toolkit --webui
 ```
 
-Launch the GUI:
+Or use the dedicated Web launcher:
 
 ```powershell
-codex-toolkit --gui
+codex-toolkit-web
 ```
-
-On Windows this path prefers launching the GUI as a detached no-console process.
-
-Or use the dedicated launcher:
-
-```powershell
-codex-toolkit-gui
-```
-
-The launcher prefers `pythonw` so the GUI does not keep an extra `cmd` window open.
-
-The legacy launchers `fork.cmd` and `fork-gui.cmd` are kept as compatibility shims.
 
 If the project directory is not in `PATH`, use:
 
 ```powershell
-.\codex-toolkit.cmd -ls
-```
-
-Or run the script directly:
-
-```powershell
-python .\scripts\fork_cli.py -ls
-```
-
-Or:
-
-```powershell
-python .\scripts\fork_gui.py
+.\codex-toolkit-web.cmd
 ```
 
 List switchable accounts:
@@ -81,12 +57,6 @@ Switch to a specific account:
 
 ```powershell
 codex-toolkit --switch-account user1
-```
-
-If your account source folders live outside the default location, pass:
-
-```powershell
-codex-toolkit --list-accounts --accounts-root D:\path\to\accounts
 ```
 
 Inspect transfer groups for the current workdir:
@@ -107,29 +77,11 @@ Copy conversations to another account:
 codex-toolkit --copy-conversations-to api --transfer-sources THREAD_ID_1 THREAD_ID_2
 ```
 
-## Controls
+## Interfaces
 
-- `↑ / ↓`: move selection
-- `Enter`: confirm
-- `Backspace`: go back
-- `q`: quit
-
-## GUI
-
-- The GUI uses a modern dark card-based layout with a workspace rail and split content panels
-- `Workdir` uses an editable dropdown that remembers recently selected or used work directories
-- A recent-workdirs list is shown on the left side for one-click switching
-- The GUI prefers the last remembered work directory on the next launch
-- You can enable “minimize to tray when closing” so the close button hides the window instead of exiting
-- `Refresh` button: reload the conversation list for the selected `codex_home` and `workdir`
-- Changing `Workdir` triggers an automatic refresh
-- The `Account Switcher` panel can browse an accounts root, detect the currently installed profile, and switch with one click
-- `F5`: trigger a manual refresh
-- Double-click a user message or use `Fork Selected Turn` to create a fork
-- After a successful fork, the GUI refreshes the conversation list automatically
-
-After entering a conversation, the tool shows only user messages.
-Once a target message is selected, it creates a new thread and rolls that new thread back to the matching turn.
+- The Web UI is the only graphical frontend and is served locally from the bundled Python backend
+- The CLI remains available for interactive browsing and direct account or transfer operations
+- The Tk desktop GUI has been removed from the codebase
 
 ## Project Structure
 
@@ -140,37 +92,37 @@ Once a target message is selected, it creates a new thread and rolls that new th
 │  └─ README.md
 ├─ add_to_user_path.cmd
 ├─ codex-toolkit.cmd
-├─ codex-toolkit-gui.cmd
+├─ codex-toolkit-web.cmd
 ├─ fork.cmd
-├─ fork-gui.cmd
 ├─ LICENSE
 ├─ README.md
 ├─ README_CN.md
 ├─ tests
-│  └─ test_conversation_transfer.py
+│  ├─ test_conversation_transfer.py
+│  └─ test_webui_api.py
 └─ scripts
    ├─ account_switcher.py
    ├─ app_state.py
    ├─ conversation_transfer.py
    ├─ desktop_app.py
    ├─ fork_cli.py
-   ├─ fork_gui.py
-   ├─ gui_theme.py
    ├─ session_tool.py
    ├─ transfer_cli.py
-   └─ transfer_dialog.py
+   └─ webui
+      ├─ __init__.py
+      ├─ api.py
+      ├─ server.py
+      └─ assets
 ```
 
 ## Module Roles
 
-- `fork_gui.py`: main dashboard window, workspace browser, account switcher, and fork flow orchestration
-- `transfer_dialog.py`: dedicated conversation transfer window and its GUI-only interaction logic
-- `fork_cli.py`: primary CLI entrypoint for workspace browsing, forking, and account operations
+- `fork_cli.py`: primary CLI entrypoint for workspace browsing, forking, account operations, and Web UI launch
 - `transfer_cli.py`: non-interactive transfer commands for listing, assigning, and copying conversations
 - `conversation_transfer.py`: transfer domain logic including provider inference, conversation grouping, ownership classification, and copy workflow
-- `app_state.py`: local JSON-backed state management for remembered GUI workdirs and account-session mappings
-- `desktop_app.py`: shared Codex Desktop restart helpers
-- `gui_theme.py`: shared GUI color and typography constants
+- `app_state.py`: local JSON-backed state management for remembered workdirs and account-session mappings
+- `webui/api.py`: local HTTP-facing service layer for sessions, account switching, transfer, and fork actions
+- `webui/server.py`: local Web server and static asset delivery for the browser UI
 - `session_tool.py`: rollout packaging, import/export, and thread index maintenance helpers
 
 ## Notes
@@ -181,10 +133,8 @@ Once a target message is selected, it creates a new thread and rolls that new th
 - If Codex Desktop is running, the tool also restarts the app to refresh the thread list
 - Account switching uses the same `codex_home` directory and overwrites only `config.toml` and `auth.json`
 - Existing target account files are backed up into `account-switch-backups\...` before overwrite
-- Account sources are discovered from `.\\accounts` first, then from the sibling `..\\codex-user-change` folder if present
-- If the new thread still does not appear, reopen Codex manually
-- Local GUI state and transfer mapping are stored under `%APPDATA%\codex-any-node-fork` via a shared state layer
-- GUI theme constants, desktop restart logic, transfer CLI commands, and the transfer dialog now live in separate modules to reduce maintenance overhead
+- Account sources are discovered from `.\accounts` first, then from the sibling `..\codex-user-change` folder if present
+- Workspace state and transfer mapping are stored under `%APPDATA%\codex-any-node-fork`
 
 ## License
 
